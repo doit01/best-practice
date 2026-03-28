@@ -59,6 +59,13 @@ public class Role {
 
 
 N+1 问题
+List<User> users = userRepository.findAll(); // 执行 1 条 SQL: select * from user  10条记录
+
+for (User user : users) {
+    // 每次循环，因为 orders 是懒加载且未被初始化，JPA 会执行一条 SQL 去查该用户的订单
+    System.out.println(user.getOrders().size()); 
+}
+循环出来10次的懒加载查询。所以一共11次查询。
 
 解决
 使用JOIN FETCH（最常用）
