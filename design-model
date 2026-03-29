@@ -31,6 +31,7 @@ public class Order {
     private LocalDateTime createTime;
     
     // 聚合内部对象，只能通过聚合根访问
+// cascade = CascadeType.ALL 是关键  当保存 Order 时，会自动保存、更新、删除关联的 OrderItem
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<OrderItem> items = new ArrayList<>();
     
