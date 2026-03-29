@@ -1,0 +1,8 @@
+严格划分限界上下文（Bounded Context）
+很多系统“不 smart”的原因，是在通用子域（如权限、导出）上过度设计，而在核心域上潦草应付。
+将行为放在实体（Entity）与值对象（Value Object）中
+实践：
+实体负责自身的状态变更与不变量校验。
+复杂计算、业务规则应封装在值对象中（如 Money、Percentage、DateRange）。
+Service 只做无状态编排，不承载核心业务规则。
+  
