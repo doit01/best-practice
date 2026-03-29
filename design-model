@@ -6,3 +6,295 @@
 复杂计算、业务规则应封装在值对象中（如 Money、Percentage、DateRange）。
 Service 只做无状态编排，不承载核心业务规则。
   
+ 状态模式：管理复杂状态机
+当实体状态流转复杂（如订单：待支付 → 已支付 → 已发货 → 已完成 / 已取消），且不同状态下行为差异显著时，状态模式优于遍地 if (state == xxx)。
+配合状态机引擎（如 Spring Statemachine 或自建轻量级实现）可使流转规则可视化。
+
+规格模式（Specification）：表达业务规则
+将业务规则（如“用户可享受VIP折扣”、“订单可取消”）封装为规格对象，可组合、可复用。
+避免业务规则散落在 Service 或 Entity 各处。
+
+复杂流程场景，先在白板上画出聚合边界、状态机、事件流，再动手写代码
+
+用聚合（Aggregate）保证一致性边界
+聚合是事务一致性边界。一个聚合内，多个对象（根实体+子实体）在一次事务中保持一致
+正确设计：聚合根保证一致性
+1. 定义聚合根和边界
+java
+// 聚合根：Order（整个聚合的入口）
+@Entity
+public class Order {
+    @Id
+    private String id;
+    private OrderStatus status;
+    private String userId;
+    private LocalDateTime createTime;
+    
+    // 聚合内部对象，只能通过聚合根访问
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<OrderItem> items = new ArrayList<>();
+    
+    // 不存储 totalAmount 冗余字段，改为动态计算
+    // 或者存储但保证每次修改时同步更新
+    
+    // 构造方法保证创建时的一致性
+    public Order(String id, String userId, List<OrderItem> initialItems) {
+        if (initialItems == null || initialItems.isEmpty()) {
+            throw new BusinessException("订单至少包含一个商品");
+        }
+        
+        this.id = id;
+        this.userId = userId;
+        this.status = OrderStatus.PENDING_PAYMENT;
+        this.createTime = LocalDateTime.now();
+        
+        // 建立双向关系，聚合根负责维护
+        for (OrderItem item : initialItems) {
+            item.setOrder(this);
+            this.items.add(item);
+        }
+        
+        // 验证不变量
+        validateInvariants();
+    }
+    
+    // 聚合根提供的业务方法（封装了业务规则）
+    public void addItem(String productId, Integer quantity, BigDecimal unitPrice) {
+        // 业务规则：只有待支付的订单可以修改
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            throw new BusinessException("只有待支付状态的订单可以修改商品");
+        }
+        
+        // 检查商品是否已存在
+        if (items.stream().anyMatch(i -> i.getProductId().equals(productId))) {
+            throw new BusinessException("商品已存在于订单中，请使用修改数量");
+        }
+        
+        OrderItem newItem = new OrderItem(productId, quantity, unitPrice);
+        newItem.setOrder(this);
+        items.add(newItem);
+        
+        // 聚合根负责维护不变量
+        validateInvariants();
+    }
+    
+    public void updateItemQuantity(String productId, Integer newQuantity) {
+        // 业务规则校验
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            throw new BusinessException("只有待支付状态的订单可以修改商品");
+        }
+        
+        if (newQuantity <= 0) {
+            throw new BusinessException("商品数量必须大于0");
+        }
+        
+        OrderItem item = items.stream()
+            .filter(i -> i.getProductId().equals(productId))
+            .findFirst()
+            .orElseThrow(() -> new BusinessException("商品不存在"));
+        
+        item.updateQuantity(newQuantity);  // 委托给子实体
+        
+        validateInvariants();  // 验证总金额一致性
+    }
+    
+    public void removeItem(String productId) {
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            throw new BusinessException("只有待支付状态的订单可以修改商品");
+        }
+        
+        boolean removed = items.removeIf(i -> i.getProductId().equals(productId));
+        if (!removed) {
+            throw new BusinessException("商品不存在");
+        }
+        
+        if (items.isEmpty()) {
+            throw new BusinessException("订单不能为空");
+        }
+        
+        validateInvariants();
+    }
+    
+    public void pay() {
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            throw new BusinessException("只有待支付订单可以支付");
+        }
+        
+        if (items.isEmpty()) {
+            throw new BusinessException("订单为空，无法支付");
+        }
+        
+        this.status = OrderStatus.PAID;
+        // 支付后，所有订单项状态也需要更新
+        for (OrderItem item : items) {
+            item.onOrderPaid();  // 子实体响应聚合根的状态变化
+        }
+    }
+    
+    public void cancel() {
+        if (this.status == OrderStatus.SHIPPED) {
+            throw new BusinessException("已发货订单不能取消");
+        }
+        
+        this.status = OrderStatus.CANCELLED;
+        for (OrderItem item : items) {
+            item.onOrderCancelled();
+        }
+    }
+    
+    // 核心不变量：总金额必须等于所有订单项金额之和
+    private void validateInvariants() {
+        BigDecimal calculatedTotal = items.stream()
+            .map(OrderItem::getSubtotal)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        
+        // 如果存储了 totalAmount 字段，这里需要同步
+        // 为了简化，我们这里不存储，需要时实时计算
+        
+        // 其他不变量检查
+        if (items.stream().anyMatch(item -> item.getQuantity() <= 0)) {
+            throw new BusinessException("商品数量必须大于0");
+        }
+        
+        if (items.stream().anyMatch(item -> item.getUnitPrice().compareTo(BigDecimal.ZERO) <= 0)) {
+            throw new BusinessException("商品价格必须大于0");
+        }
+    }
+    
+    // 对外提供只读访问
+    public BigDecimal getTotalAmount() {
+        return items.stream()
+            .map(OrderItem::getSubtotal)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+    
+    public List<OrderItem> getItems() {
+        // 返回不可变集合，防止外部直接修改
+        return Collections.unmodifiableList(items);
+    }
+    
+    // 其他 getter...
+}
+
+// 子实体：OrderItem（属于Order聚合）
+@Entity
+public class OrderItem {
+    @Id
+    private String id;
+    private String productId;
+    private Integer quantity;
+    private BigDecimal unitPrice;
+    
+    @ManyToOne
+    @JoinColumn(name = "order_id")
+    private Order order;  // 反向引用聚合根
+    
+    // 保护构造器（JPA 需要）
+    protected OrderItem() {}
+    
+    // 包级权限构造器，只能由聚合根创建
+    OrderItem(String productId, Integer quantity, BigDecimal unitPrice) {
+        this.id = UUID.randomUUID().toString();
+        this.productId = productId;
+        this.quantity = quantity;
+        this.unitPrice = unitPrice;
+    }
+    
+    // 包级权限方法，只能由聚合根调用
+    void updateQuantity(Integer newQuantity) {
+        this.quantity = newQuantity;
+        // 注意：这里不直接更新 subtotal，需要聚合根重新计算总金额
+    }
+    
+    void onOrderPaid() {
+        // 支付后的业务逻辑，比如扣减库存
+        // 这里可以发布领域事件
+    }
+    
+    void onOrderCancelled() {
+        // 取消后的业务逻辑
+    }
+    
+    // 提供计算属性
+    public BigDecimal getSubtotal() {
+        return unitPrice.multiply(new BigDecimal(quantity));
+    }
+    
+    // 只读 getter
+    public String getProductId() { return productId; }
+    public Integer getQuantity() { return quantity; }
+    public BigDecimal getUnitPrice() { return unitPrice; }
+}
+2. Service 层变得简洁
+java
+@Service
+public class OrderService {
+    private final OrderRepository orderRepository;
+    
+    @Transactional
+    public String createOrder(CreateOrderCommand cmd) {
+        List<OrderItem> items = cmd.getItems().stream()
+            .map(item -> new OrderItem(
+                item.getProductId(),
+                item.getQuantity(),
+                item.getUnitPrice()))
+            .collect(Collectors.toList());
+        
+        Order order = new Order(UUID.randomUUID().toString(), cmd.getUserId(), items);
+        
+        orderRepository.save(order);
+        
+        // 可以发布领域事件
+        eventPublisher.publish(new OrderCreatedEvent(order.getId()));
+        
+        return order.getId();
+    }
+    
+    @Transactional
+    public void addItem(String orderId, AddItemCommand cmd) {
+        Order order = orderRepository.findById(orderId);
+        order.addItem(cmd.getProductId(), cmd.getQuantity(), cmd.getUnitPrice());
+        orderRepository.save(order);
+        // 一致性由聚合根保证，Service 无需关心细节
+    }
+    
+    @Transactional
+    public void updateItemQuantity(String orderId, String productId, Integer quantity) {
+        Order order = orderRepository.findById(orderId);
+        order.updateItemQuantity(productId, quantity);
+        orderRepository.save(order);
+    }
+    
+    @Transactional
+    public void payOrder(String orderId) {
+        Order order = orderRepository.findById(orderId);
+        order.pay();
+        orderRepository.save(order);
+    }
+}
+四、聚合的关键原则体现
+1. 一致性边界
+一个事务中，Order 及其所有 OrderItem 保持一致
+
+不会出现 Order 状态改变但 OrderItem 未更新的情况
+
+总金额始终与订单项金额总和一致（通过 validateInvariants() 保证）
+
+2. 通过聚合根访问
+java
+// ❌ 错误：绕过聚合根直接修改子实体
+OrderItem item = orderItemRepository.findById(itemId);
+item.setQuantity(10);  // 可能违反业务规则
+
+// ✅ 正确：通过聚合根操作
+Order order = orderRepository.findById(orderId);
+order.updateItemQuantity(productId, 10);
+3. 事务范围等于聚合范围
+java
+@Transactional  // 事务边界 = 聚合边界
+public void updateItemQuantity(String orderId, String productId, Integer quantity) {
+    Order order = orderRepository.findById(orderId);
+    order.updateItemQuantity(productId, quantity);  // 所有修改在一次事务中
+    orderRepository.save(order);
+}
+
