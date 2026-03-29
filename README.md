@@ -29,6 +29,15 @@ public class User {
                                foreignKey = @ForeignKey(name = "fk_user_role_role"))
     )
     private Set<Role> roles = new HashSet<>();  // 用Set！
+
+    或者简化写法
+    @ManyToManyy(fetch = FetchType.LAZY)  // 必须懒加载
+private Set<Role> roles = new HashSet<>();
+自动生成中间表名：user_roles（实体名_属性名）
+自动生成外键列名：user_id、roles_id
+自动生成外键约束名（随机字符串）
+
+
     
     // ✅ 添加移除的辅助方法
     public void addRole(Role role) {
