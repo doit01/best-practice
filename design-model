@@ -299,3 +299,55 @@ public void updateItemQuantity(String orderId, String productId, Integer quantit
     orderRepository.save(order);
 }
 
+领域事件=========================================================================================================================================================
+方案	代码量	适用场景	优点
+Spring 原生事件	极少	绝大多数业务系统	零配置、和事务集成好、够用
+Spring + @Async	极少	需要异步处理的场景	一行注解解决异步
+最常用的模式
+java
+// 90% 的场景这样写就够了
+@Service
+public class OrderService {
+    @Autowired
+    private ApplicationEventPublisher publisher;
+    
+    @Transactional
+    public void createOrder(Order order) {
+        // 1. 保存订单
+        orderRepository.save(order);
+        
+        // 2. 发布事件（就这么简单）
+        publisher.publishEvent(new OrderCreatedEvent(order));
+    }
+}
+
+@Component
+public class OrderEventHandlers {
+    
+    @EventListener
+    public void onCreated(OrderCreatedEvent event) {
+        // 扣库存
+        stockService.deduct(event.getOrder());
+    }
+    
+    @EventListener
+    @Async  // 如果不需要等结果，加个异步
+    public void onCreatedAsync(OrderCreatedEvent event) {
+        // 发短信、写日志等不重要的操作
+        smsService.send(event.getOrder().getUserId(), "订单创建成功");
+    }
+    
+    @EventListener
+    @Transactional(propagation = Propagation.REQUIRES_NEW)  // 独立事务
+    public void onCreatedNewTx(OrderCreatedEvent event) {
+        // 写报表数据，即使失败也不影响主订单
+        reportService.record(event.getOrder());
+    }
+}
+总结
+最简单的实践：
+
+用 ApplicationEventPublisher 发布事件
+用 @EventListener 监听处理
+需要异步就加 @Async
+需要独立事务就加 @Transactional(REQUIRES_NEW)
