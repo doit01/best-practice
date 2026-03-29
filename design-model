@@ -351,3 +351,56 @@ public class OrderEventHandlers {
 用 @EventListener 监听处理
 需要异步就加 @Async
 需要独立事务就加 @Transactional(REQUIRES_NEW)
+
+
+场景1：事件处理失败应该导致主业务回滚（强一致性）
+java
+// 最简单的场景：Spring 默认行为就能满足
+@Service
+public class OrderService {
+    @Transactional
+    public void createOrder(Order order) {
+        orderRepository.save(order);
+        
+        // 事件处理器在同一个事务内执行
+        // 处理器抛异常 → 订单回滚
+        publisher.publishEvent(new OrderCreatedEvent(order));
+    }
+}
+
+@Component
+public class OrderEventHandler {
+    @EventListener
+    public void handle(OrderCreatedEvent event) {
+        // 扣库存，如果库存不足抛异常
+        inventoryService.deduct(event.getOrder()); 
+        // 抛异常 → 整个事务回滚，订单也保存失败
+    }
+}
+优点：简单，保证一致性
+缺点：事件处理耗时会影响主事务
+
+场景2：事件处理失败不影响主业务（最终一致性）
+这是最常见的问题：订单保存成功，但扣库存失败怎么办？
+
+解决方案A：@TransactionalEventListener（Spring 4.2+）
+java
+@Component
+public class OrderEventHandler {
+    
+    // 在事务提交后执行
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void handleAfterCommit(OrderCreatedEvent event) {
+        // 此时主事务已经提交成功
+        // 即使这里失败，订单也已经保存了
+        inventoryService.deduct(event.getOrder());
+    }
+    
+    // 事务回滚时执行（可选）
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_ROLLBACK)
+    public void handleAfterRollback(OrderCreatedEvent event) {
+        // 清理工作，比如记录日志
+        log.info("订单创建失败: {}", event.getOrderId());
+    }
+}
+注意：如果 AFTER_COMMIT 中的处理失败，订单已提交，需要补偿机制。
